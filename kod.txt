@@ -1,0 +1,96 @@
+#define BLYNK_TEMPLATE_ID ""
+#define BLYNK_TEMPLATE_NAME "Pogodynka"
+#define BLYNK_AUTH_TOKEN ""   //Your token from Blynk
+
+#define BLYNK_PRINT Serial 
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+#define ONE_WIRE_BUS D4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+BlynkTimer timer;
+
+int lcdColumns = 16;
+int lcdRows = 2;
+
+LiquidCrystal_I2C lcd(0x27, lcdColumns, lcdRows); // Including LCD display with I2C (on esp8266 SLC pin to D1 and SDA pin to D2)
+
+float temp, temp1;  
+ 
+char auth[] = "";  //Your token from Blynk
+char ssid[] = "";   //Name of your network
+char pass[] = "";  //Password to your network
+
+void setup() {
+  Serial.begin(115200);
+  sensors.begin();
+  connectToWiFi();
+  Blynk.config(auth);
+  timer.setInterval(3000L, sendTemps);
+  lcd.init();
+  lcd.clear();         
+  lcd.backlight();  
+}
+
+void loop() {
+  if (Blynk.connected()) {
+    Blynk.run();
+  }
+  timer.run();
+  monitorWiFiConnection();
+  updateLCD();
+}
+
+void sendTemps() {
+  sensors.requestTemperatures(); 
+  temp = sensors.getTempCByIndex(0); 
+  temp1 = sensors.getTempCByIndex(1); 
+  Blynk.virtualWrite(V0, temp);    //Virtual pins to set up on Blynk (V0)
+  Blynk.virtualWrite(V1, temp1);   //Virtual pins to set up on Blynk (V1)
+}
+
+void monitorWiFiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Brak połączenia z WiFi. Ponowne łączenie...");
+    connectToWiFi();
+  }
+}
+
+void updateLCD() {
+  lcd.setCursor(0, 0);
+  lcd.print("Out: "); //Displaying temperature from outside in Celsius
+  lcd.print(temp);
+  lcd.print((char)223);
+  lcd.print("C");
+  lcd.setCursor(0,1);
+  lcd.print("In: ");  //Displaying temperature from inside in Celsius
+  lcd.print(temp1);
+  lcd.print((char)223);
+  lcd.print("C");
+}
+
+void connectToWiFi() {
+  Serial.println("Łączenie z siecią WiFi...");
+  
+  WiFi.begin(ssid, pass);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+    if (++attempts >= 10) { // Próba połączenia przez maksymalnie 10 sekund
+      Serial.println("Nie udało się połączyć z siecią WiFi. Spróbuj ponownie.");
+      return;
+    }
+  }
+  
+  Serial.println("");
+  Serial.println("Połączono z siecią WiFi!");
+  Serial.print("Adres IP: ");
+  Serial.println(WiFi.localIP());
+}
