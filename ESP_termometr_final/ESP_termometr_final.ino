@@ -1,4 +1,5 @@
 #include <ESP8266WiFi.h>
+#include <ESP8266Ping.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Wire.h>
@@ -20,12 +21,13 @@ unsigned long previousMillis = 0;
 const long interval = 5000; // 5 seconds
 bool showTemp = false;
 bool timeInitialized = false;
+bool internetAvailable = false;
 
 const char* ssid = "Your Network SSID";
 const char* password = "Your Network Password"; 
 
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600, 60000); // 60s update interval
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600, 60000);
 
 void displayMessage(String line1, String line2 = "") {
   lcd.clear();
@@ -38,18 +40,31 @@ void displayMessage(String line1, String line2 = "") {
   delay(2000);
 }
 
+bool checkInternetConnection() {
+  const int maxAttempts = 3;
+  for (int i = 0; i < maxAttempts; i++) {
+    if (Ping.ping("8.8.8.8", 1)) {
+      return true;
+    }
+    delay(1000);
+  }
+  return false;
+}
+
 void adjustTimeOffset() {
+  if (!internetAvailable) return;
+  
   time_t now = timeClient.getEpochTime();
   if (now < 100000) return;
   
-  struct tm *timeinfo = localtime(&now);
+  struct tm *timeinfo = gmtime(&now);
   int year = timeinfo->tm_year + 1900;
   int month = timeinfo->tm_mon + 1;
   int day = timeinfo->tm_mday;
   int hour = timeinfo->tm_hour;
   
   if (month > 3 && month < 10) {
-    timeClient.setTimeOffset(7200); // CEST (UTC+2)
+    timeClient.setTimeOffset(7200);
   } else if (month == 3) {
     int lastSunday = (31 - (5 * year / 4 + 4) % 7);
     if (day > lastSunday || (day == lastSunday && hour >= 2)) {
@@ -64,8 +79,8 @@ void adjustTimeOffset() {
 }
 
 void displayDateTime() {
-  if (!timeInitialized) {
-    displayMessage("Time not synced!", "Using local time");
+  if (!timeInitialized || !internetAvailable) {
+    displayMessage("No internet", "Check WiFi");
     return;
   }
   
@@ -75,12 +90,15 @@ void displayDateTime() {
   String timeStr = timeClient.getFormattedTime();
   unsigned long epochTime = timeClient.getEpochTime();
   
-  time_t rawtime = epochTime;
-  struct tm *timeinfo;
-  timeinfo = localtime(&rawtime);
+  // Poprawiona konwersja czasu
+  time_t rawtime = (time_t)epochTime; // Rzutowanie na poprawny typ
+  struct tm *timeinfo = gmtime(&rawtime);
   
   char dateStr[11];
-  sprintf(dateStr, "%02d-%02d-%04d", timeinfo->tm_mday, timeinfo->tm_mon + 1, timeinfo->tm_year + 1900);
+  sprintf(dateStr, "%02d-%02d-%04d", 
+         timeinfo->tm_mday, 
+         timeinfo->tm_mon + 1, 
+         timeinfo->tm_year + 1900);
   
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -88,7 +106,7 @@ void displayDateTime() {
   lcd.print(dateStr);
   lcd.setCursor(0, 1);
   lcd.print("Time:");
-  lcd.print(timeStr.substring(0, 5)); // Hours and minutes
+  lcd.print(timeStr.substring(0, 5));
 }
 
 void displayTemperature() {
@@ -106,12 +124,43 @@ void displayTemperature() {
   lcd.print("C");
 }
 
+void checkConnection() {
+  static unsigned long lastCheck = 0;
+  const long checkInterval = 30000; // 30 sekund
+  
+  if (millis() - lastCheck >= checkInterval) {
+    lastCheck = millis();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      internetAvailable = false;
+      displayMessage("WiFi disconnected", "Reconnecting...");
+      WiFi.reconnect();
+      delay(1000);
+      return;
+    }
+    
+    internetAvailable = checkInternetConnection();
+    
+    if (!internetAvailable) {
+      displayMessage("No internet", "Check connection");
+      timeInitialized = false;
+    } else if (!timeInitialized) {
+      displayMessage("Syncing time...", "with NTP server");
+      timeClient.begin();
+      timeInitialized = true;
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   lcd.init();
   lcd.backlight();
   
-  displayMessage("Connecting to WiFi...", ssid);
+  displayMessage("Connecting to WiFi");
+  
+  pinMode(0, INPUT_PULLUP); // GPIO0 jako wejście
+  if(digitalRead(0) == LOW) delay(1000);
   
   WiFi.begin(ssid, password);
   int attempts = 0;
@@ -130,36 +179,24 @@ void setup() {
   
   String ip = WiFi.localIP().toString();
   displayMessage("WiFi connected", "IP: " + ip);
-  delay(2000);
-
+  
+  internetAvailable = checkInternetConnection();
+  if (internetAvailable) {
+    displayMessage("Internet OK", "Syncing time...");
+    timeClient.begin();
+    timeInitialized = true;
+  } else {
+    displayMessage("No internet", "Check connection");
+  }
+  
   sensors.begin();
-  displayMessage("Initializing", "sensors...");
-  
-  timeClient.begin();
-  displayMessage("Getting time", "from NTP...");
-  
-  int timeAttempts = 0;
-  while (timeAttempts < 10) {
-    if (timeClient.update() && timeClient.getEpochTime() > 100000) {
-      timeInitialized = true;
-      adjustTimeOffset();
-      displayMessage("Time synced!", "with NTP server");
-      break;
-    }
-    delay(1000);
-    timeAttempts++;
-    if (timeAttempts % 3 == 0) {
-      displayMessage("Attempt " + String(timeAttempts) + "/10", "Syncing time...");
-    }
-  }
-  
-  if (!timeInitialized) {
-    displayMessage("Sync failed", "Using local time");
-  }
+  delay(2000);
 }
 
 void loop() {
   unsigned long currentMillis = millis();
+  
+  checkConnection();
   
   sensors.requestTemperatures();
   temp1 = sensors.getTempCByIndex(0);
@@ -168,26 +205,15 @@ void loop() {
   if (currentMillis - previousMillis >= interval) {
     previousMillis = currentMillis;
     
-    if (showTemp) {
-      displayTemperature();
+    if (internetAvailable) {
+      if (showTemp) {
+        displayTemperature();
+      } else {
+        displayDateTime();
+      }
+      showTemp = !showTemp;
     } else {
-      displayDateTime();
-    }
-    
-    showTemp = !showTemp;
-  }
-  
-  if (WiFi.status() != WL_CONNECTED) {
-    timeInitialized = false;
-    WiFi.reconnect();
-    delay(1000);
-  }
-  
-  if (timeInitialized && currentMillis % 60000 == 0) {
-    if (!timeClient.update()) {
-      timeInitialized = false;
-      displayMessage("NTP update", "failed!");
-      delay(2000);
+      displayMessage("No internet", "Check WiFi");
     }
   }
   
